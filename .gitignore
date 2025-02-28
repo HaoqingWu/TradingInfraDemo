@@ -1,0 +1,11 @@
+__pycache__/
+Research/
+FeatureEngineering/
+Keys/
+draft/
+MarketDataLoader/OfflineData/
+*.ipynb
+.idea/
+*.pyc
+*.tsv
+.vscode/
