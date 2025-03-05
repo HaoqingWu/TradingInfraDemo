@@ -875,6 +875,7 @@ class Backtest:
                 'Entry Price': [],
                 'Direction': [],
                 'Close PnL': [],
+                'Open PnL': []
             }
             for trade in status_dict[ lastTimeStamp ].cur_positions[ imnt ].positions: # loop trades
                 res[ imnt ][ 'Open Time' ].append( trade.open_time )
@@ -882,6 +883,7 @@ class Backtest:
                 res[ imnt ][ 'Direction' ].append( trade.direction )
                 res[ imnt ][ 'Close Time' ].append( trade.close_time )
                 res[ imnt ][ 'Close PnL' ].append( trade.closed_pnl )
+                res[ imnt ][ 'Open PnL' ].append( trade.open_pnl )
             
             res[ imnt ] = pd.DataFrame( res[ imnt ] )
 
