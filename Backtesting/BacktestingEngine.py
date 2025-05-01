@@ -23,6 +23,8 @@ import logging
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 
 from typing import Optional, Union
 from enum import Enum
@@ -30,7 +32,7 @@ from dataclasses import dataclass, field
 import copy
 
 # Configure logging
-logging.basicConfig( level = logging.INFO, 
+logging.basicConfig( level = logging.ERROR, 
                      format = "%(asctime)s - %(levelname)s - %(message)s")
 
 # Global Constants
@@ -96,7 +98,7 @@ class Order:
         fields = [f"{field.name}: {getattr(self, field.name)}" for field in self.__dataclass_fields__.values()]
         return " | ".join(fields)
     
-    def orderFilledToTrade( self, open_time: pd.Timestamp ) -> 'Trade':
+    def _orderFilledToTrade( self, open_time: pd.Timestamp ) -> 'Trade':
         """ transform an order to a trade if filled """
 
         trade = Trade( imnt = self.imnt, 
@@ -136,7 +138,7 @@ class OrderTicket( dict[str, list[Order]] ):
             if order.imnt not in self:
                 self[ order.imnt ] = []
             self[ order.imnt ].append( order )
-            print(f"{order.cur_time}: Added order: {order.info}")
+            logging.info( f"{order.cur_time} Added order: {order.info}" )
 
     def remove_order( self, order: Order ):
         """
@@ -151,7 +153,7 @@ class OrderTicket( dict[str, list[Order]] ):
         
         if order in self[ imnt ]:
             self[ imnt ].remove( order )
-            print(f"{order.cur_time}: Order removed for {imnt}.")
+            logging.info(f"{order.cur_time}: Order removed for {imnt}.")
         else:
             print(f"No matching orders found for {imnt}.")
 
@@ -178,7 +180,7 @@ class OrderTicket( dict[str, list[Order]] ):
                     if new_duration > 0:
                         updated_orders.append( Order( order.imnt, order.price, order.direction, order.type, order.leverage, order.size, order.cur_time, new_duration) )
                     elif new_duration == 0:
-                        print(f"{imnt} order: at Price {order.price} has expired and will be removed.")
+                        logging.info(f"{imnt} order: at Price {order.price} has expired and will be removed.")
             # If there are still active orders, update the list
             if updated_orders:
                 self[ imnt ] = updated_orders
@@ -297,17 +299,6 @@ class Trade:
                 raise ValueError( "Something is wrong: Closed PnL > open PnL!" )
             self.open_pnl   -= self.closed_pnl
             self.size       -= close_size
-            
-
-    def update_trade( self, order: Order ) -> None:
-        # TODO: this has never been used
-        """ update the trade """
-        if self.direction != order.direction:
-            raise ValueError( "The direction of the trade and order do not match!" )
-        if order.type == OrderType.OPEN:
-            self.add_position( order.price, order.size )
-        else:
-            self.close_position( order.price, order.size, order.cur_time )
 
     def _update_unrealized_pnl( self, cur_price: float ) -> None:
         """ update the current MtM pnl of the trade """
@@ -315,7 +306,7 @@ class Trade:
             self.open_pnl = ( cur_price - self.entry_price ) * self.size  
         else:
             self.open_pnl = ( self.entry_price - cur_price ) * self.size
-        print(f"Updated trade: {self.direction.value} {self.imnt}. Open PnL: {self.open_pnl}")
+        logging.info( f"Updated trade: {self.direction.value} {self.imnt}. Open PnL: {self.open_pnl}")
 
 
 class PositionManager:
@@ -326,6 +317,7 @@ class PositionManager:
     def __init__( self, imnt: str, positions: list[ Trade ] = [] ):
         self.imnt: str = imnt
         self.positions: list[ Trade ] = positions if positions else []
+        self.cumClosedPnL: float = 0.0
 
     def process_new_trade( self, new_trade: Trade ) -> None:
         """
@@ -344,8 +336,13 @@ class PositionManager:
             if cur_position.direction == new_trade.direction:
                 cur_position.add_position( new_trade.entry_price, new_trade.size )
             else:
+                # Store the initial closed_pnl before closing
+                initial_closed_pnl = cur_position.closed_pnl
                 cur_position.close_position( new_trade.entry_price, new_trade.size, new_trade.open_time )
-        
+                
+                # Add only the new closed PnL (not double counting)
+                self.cumClosedPnL += (cur_position.closed_pnl - initial_closed_pnl)
+                
         # open a new position
         elif ( not cur_position ) or ( cur_position.trade_status == TradeStatus.CLOSED ): # no open position
             self.positions.append( new_trade )
@@ -377,7 +374,8 @@ class BacktestStatus:
 
         cur_positions (dict[str, PositionManager]): A dictionary that stores the current positions for each instrument.
         cur_priceVector (dict[str, float]): A dictionary that stores the current price for each instrument.
-        cur_PnLVector (dict[str, float]): A dictionary that stores the current cumulative PnL for each instrument.
+        cur_OpenPnLVector (dict[str, float]): A dictionary that stores the current Open PnL for each instrument.
+        cur_CumulativePnL (dict[str, float]): A dictionary that stores the cumulative PnL for each instrument.
         cur_cash (float): The current cash available for trading.
         cur_portfolioMtMValue (float): The current market-to-market value of the portfolio.
         cur_orderTicket (OrderTicket): The current order ticket that stores the trading orders.
@@ -390,7 +388,8 @@ class BacktestStatus:
 
     cur_positions: dict[str, 'PositionManager'] = field(init=False)
     cur_priceVector: dict[str, float] = field(init=False)
-    cur_PnLVector: dict[str, float] = field(init=False)
+    cur_OpenPnLVector: dict[str, float] = field(init=False)
+    cur_CumulativePnL: dict[str, float] = field(init=False)
     cur_cash: float = field( init = False )
     cur_fundingCost: dict[str, float] = field( init=False )
     cur_portfolioMtMValue: float = field(init=False)
@@ -403,7 +402,8 @@ class BacktestStatus:
         """Initializes the default state for positions, price vector, PnL vector, etc."""
         self.cur_positions = {imnt: PositionManager(imnt) for imnt in self.tradables}
         self.cur_priceVector = {imnt: 0.0 for imnt in self.tradables}
-        self.cur_PnLVector = {imnt: 0.0 for imnt in self.tradables}
+        self.cur_OpenPnLVector = {imnt: 0.0 for imnt in self.tradables}
+        self.cur_CumulativePnL = {imnt: 0.0 for imnt in self.tradables}
         self.cur_cash = self.initial_cash
         self.cur_fundingCost = { imnt: 0.0 for imnt in self.tradables }
         self.cur_portfolioMtMValue = self.initial_cash
@@ -433,7 +433,8 @@ class BacktestStatus:
         """
         msg = (f"Current Positions: {self.cur_positions}, "
                f"Current Prices: {self.cur_priceVector}, "
-               f"Current PnLs: {self.cur_PnLVector}, "
+               f"Current Open PnL: {self.cur_OpenPnLVector}, "
+               f"Current Cumulative PnL: {self.cur_CumulativePnL}, "
                f"Current Cash: {self.cur_cash}, "
                f"Current Funding Cost Paid: {self.cur_fundingCost}, "
                f"Current Portfolio MtM Value: {self.cur_portfolioMtMValue}, "
@@ -453,7 +454,8 @@ class BacktestStatus:
         )
         new_copy.cur_positions = {imnt: copy.deepcopy(pos) for imnt, pos in self.cur_positions.items()}
         new_copy.cur_priceVector = self.cur_priceVector.copy()
-        new_copy.cur_PnLVector = self.cur_PnLVector.copy()
+        new_copy.cur_OpenPnLVector = self.cur_OpenPnLVector.copy()
+        new_copy.cur_CumulativePnL = self.cur_CumulativePnL.copy()
         new_copy.cur_cash = self.cur_cash
         new_copy.cur_fundingCost = self.cur_fundingCost.copy()
         new_copy.cur_portfolioMtMValue = self.cur_portfolioMtMValue
@@ -488,6 +490,7 @@ class Backtest:
         self._availableTimestamps = list(next(iter( self._dataDict.values())).index)
         self._totalTimeSteps = len( self._availableTimestamps )
         self._timeStampCounter = 0
+        self._performance_cache = None
         
         if not self.__checkShape():
             raise ValueError("Mismatch of instrument's market data")
@@ -703,7 +706,7 @@ class Backtest:
                 # open a new trade
                 if order_type == OrderType.OPEN and order.price <= highPrice_tPlus1 and order.price >= lowPrice_tPlus1:
                     if cash_t >= ( margin + notional * TRANSACTION_FEE ):
-                        trade = order.orderFilledToTrade( curTime )
+                        trade = order._orderFilledToTrade( curTime )
                         positions_t[ imnt ].process_new_trade( trade )
 
                         cash_t -= ( margin + notional * TRANSACTION_FEE )
@@ -744,17 +747,17 @@ class Backtest:
                             logging.info( f"{order.size} is larger than the current position, it'll get truncated to current position." )
                             order.size = abs( cur_size )
                         if order.price <= highPrice_tPlus1 and order.price >= lowPrice_tPlus1:
-                            trade = order.orderFilledToTrade( curTime )
+                            trade = order._orderFilledToTrade( curTime )
+                            initial_trade_margin = last_trade.margin
                             positions_t[ imnt ].process_new_trade( trade )
 
                             # need to be careful handling the cash here
-                            initial_trade_margin = last_trade.entry_price * trade.size / trade.leverage
+                            new_margin = positions_t[ imnt ].positions[ -1 ].margin
                             if last_trade.direction == Direction.LONG:
                                 closed_pnl = ( order.price - last_trade.entry_price ) * trade.size
                             else: # SHORT trade pnl
                                 closed_pnl = ( last_trade.entry_price - order.price ) * trade.size
-                            cash_t += ( initial_trade_margin - trade.notional * TRANSACTION_FEE + closed_pnl )
-                            # Update the open PnL of the position
+                            cash_t += ( ( initial_trade_margin - new_margin ) - ( trade.notional * TRANSACTION_FEE ) + closed_pnl )
                             # We don't need to single out when status is closed, as its size will be 0
                             if last_trade.trade_status == TradeStatus.CLOSED:
                                 assert last_trade.size == 0
@@ -780,6 +783,7 @@ class Backtest:
             cur_pos  = self._status.cur_positions[ imnt ].positions[ -1 ]
             notional = cur_pos.notional
 
+            cur_cash = self._status.cur_cash
             if cur_pos.direction == Direction.LONG:
                 if fundingRate > 0:
                     if self._status.cur_cash > abs( notional * fundingRate ):
@@ -788,11 +792,7 @@ class Backtest:
                         # not enough cash to pay the funding cost, substract the margin which is an estimate
                         cur_pos.size -= notional * fundingRate / cur_price 
                 else:
-                    self._status.cur_cash -= notional * fundingRate
-                
-                self._status.cur_fundingCost[ imnt ] -= notional * fundingRate
-
-
+                    self._status.cur_cash -= notional * fundingRate            
             else: # SHORT trade
                 if fundingRate < 0:
                     if self._status.cur_cash > abs( notional * fundingRate ):
@@ -802,7 +802,7 @@ class Backtest:
                 else:
                     self._status.cur_cash += notional * fundingRate
 
-                self._status.cur_fundingCost[ imnt ] += notional * fundingRate
+            self._status.cur_fundingCost[ imnt ] += ( cur_cash - self._status.cur_cash )
 
     def _updateStatus( self, newOrderTicket: OrderTicket, verbose: bool = True ) -> None:
         """ during the evolution of states, update the status dict """
@@ -812,7 +812,6 @@ class Backtest:
         positions_t          = self._status.cur_positions
         cash_t               = self._status.cur_cash
         orderTicket_t        = self._status.cur_orderTicket
-
 
         # Update the Order Ticket 
         orderTicket_t.update_orders() # clean up expired orders
@@ -826,14 +825,21 @@ class Backtest:
 
         # Update the cumulative PnL for each instrument
         for imnt in self._tradables:
-            # prev_cumPnL = self._status.cur_PnLVector[ imnt ]
+            # prev_cumPnL = self._status.cur_OpenPnLVector[ imnt ]
             if positions_t[ imnt ].positions:
                 # Update the unrealized/open PnL of the open trades
                 positions_t[ imnt ]._update_position_unrealized_pnl( self._status.cur_priceVector[ imnt ] )
+                
                 # Update pnl vector
+                # TODO: Currently, this part doesn't support longing and shorting on the same instrument
+
                 last_position = positions_t[ imnt ].positions[ -1 ]
                 if last_position.trade_status == TradeStatus.OPEN:
-                    self._status.cur_PnLVector[ imnt ] = last_position.open_pnl + last_position.closed_pnl
+                    self._status.cur_OpenPnLVector[ imnt ] = last_position.open_pnl
+                
+                # Update the cumulative PnL
+                self._status.cur_CumulativePnL[ imnt ] = self._status.cur_OpenPnLVector[ imnt ] \
+                                                        + positions_t[ imnt ].cumClosedPnL 
 
         if cash_t < 0:
             raise ValueError( "Cash cannot be negative!" )        
@@ -854,16 +860,231 @@ class Backtest:
             raise ValueError( "Portfolio is liquidated!" )
 
 
-    ##########################
-    ### Postprocessing API ###
-    def getPnL( self, status_dict: dict ) -> pd.DataFrame:
-        """ return the PnL of each time bar from the backtest """
-        cum_pnl_dict = { timeStamp: status.cur_PnLVector for timeStamp, status in status_dict.items() }
-        cum_pnl_df = pd.DataFrame.from_dict( cum_pnl_dict, orient='index', columns=self._tradables)
-        pnl_df = cum_pnl_df.diff().fillna( 0 )
+    ###############################
+    ### Performance Summary API ###
+    ###############################
 
-        return pnl_df
-    
+    def _getPerformanceMetrics( self, status_dict: dict ) -> dict:
+        """
+        Calculate all performance metrics at once to avoid redundant computations.
+        This private method serves as a cache for all performance calculations.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            dict: Dictionary containing all performance metrics
+        """
+
+        if not hasattr( self, '_performance_cache' ) or self._performance_cache is None:
+            # PnL data - represents the profit/loss for each instrument at each timestamp
+            cum_pnl_dict = { timeStamp: status.cur_CumulativePnL for timeStamp, status in status_dict.items() }
+            cum_pnl_df = pd.DataFrame.from_dict( cum_pnl_dict, orient = 'index', columns = self._tradables )
+
+            # Daily PnL data - represents the daily profit/loss for each instrument
+            pnl_df = cum_pnl_df.diff().fillna( 0 )
+            
+            # Portfolio value data - represents total portfolio value (including cash) at each timestamp
+            portfolio_value_dict = {timeStamp: status.cur_portfolioMtMValue for timeStamp, status in status_dict.items()}
+            portfolio_value_series = pd.Series(portfolio_value_dict, name='Portfolio Value')
+            
+            # Daily aggregations
+            daily_pnl_df = pnl_df.resample('D').sum()
+            daily_portfolio_value = portfolio_value_series.resample('D').last()
+            
+            # Returns calculation
+            daily_returns = daily_portfolio_value.pct_change()
+            daily_returns.iloc[0] = daily_portfolio_value.iloc[0] / self._initialCash - 1
+            
+            total_return = portfolio_value_series.iloc[-1] / self._initialCash - 1
+
+            # Store all results in cache
+            self._performance_cache = {
+                'cum_pnl_df': cum_pnl_df,
+                'pnl_df': pnl_df,
+                'portfolio_value_series': portfolio_value_series,
+                'daily_pnl_df': daily_pnl_df,
+                'daily_portfolio_value': daily_portfolio_value,
+                'daily_returns': daily_returns,
+                'total_pnl_by_instrument': pnl_df.sum(),
+                'total_pnl': pnl_df.sum().sum(),
+                'total_return': total_return,
+                "total_funding_cost": pd.DataFrame({t: s.cur_fundingCost for t, s in status_dict.items()} ).iloc[ :, -1],
+                'margin_series': pd.Series({t: s.cur_total_margin for t, s in status_dict.items()}, name='Total Margin'),
+                'notional_series': pd.Series({t: s.cur_total_notional for t, s in status_dict.items()}, name='Total Notional'),
+                'leverage_series': pd.Series({t: s.cur_total_leverage for t, s in status_dict.items()}, name='Total Leverage'),
+            }
+            
+        return self._performance_cache
+
+    def getPnL(self, status_dict: dict) -> pd.DataFrame:
+        """
+        Return the PnL of each time bar from the backtest.
+        This represents the profit/loss for each instrument at each timestamp.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            pd.DataFrame: DataFrame with timestamps as index and instruments as columns
+        """
+        return self._getPerformanceMetrics(status_dict)['pnl_df']
+
+    def getPortfolioDailyValues(self, status_dict: dict) -> pd.Series:
+        """
+        Return the daily portfolio value (MtM) of the backtest.
+        This represents the total portfolio value including cash, margin, and unrealized P&L.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            pd.Series: Series with dates as index and portfolio values as values
+        """
+        return self._getPerformanceMetrics(status_dict)['daily_portfolio_value']
+
+    def getDailyPnL(self, status_dict: dict) -> pd.DataFrame:
+        """
+        Return the daily PnL of the backtest aggregated by day.
+        This represents the daily profit/loss for each instrument.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            pd.DataFrame: DataFrame with dates as index and instruments as columns
+        """
+        return self._getPerformanceMetrics(status_dict)['daily_pnl_df']
+
+    def getTotalMarginSeries(self, status_dict: dict) -> pd.Series:
+        """
+        Return the total margin used in the backtest at each timestamp.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            pd.Series: Series with timestamps as index and total margin as values
+        """
+        return self._getPerformanceMetrics(status_dict)['margin_series']
+
+    def getTotalNotionalSeries(self, status_dict: dict) -> pd.Series:
+        """
+        Return the total notional value of positions in the backtest at each timestamp.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            pd.Series: Series with timestamps as index and total notional as values
+        """
+        return self._getPerformanceMetrics(status_dict)['notional_series']
+
+    def getTotalLeverageSeries(self, status_dict: dict) -> pd.Series:
+        """
+        Return the total leverage of the portfolio in the backtest at each timestamp.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            pd.Series: Series with timestamps as index and total leverage as values
+        """
+        return self._getPerformanceMetrics(status_dict)['leverage_series']
+
+    def getPortfolioDailyRelativeReturns(self, status_dict: dict) -> pd.Series:
+        """
+        Return the daily percentage changes in portfolio value.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            pd.Series: Series with dates as index and daily returns as values
+        """
+        return self._getPerformanceMetrics(status_dict)['daily_returns']
+
+    def computeInstrumentTotalReturn(self, status_dict: dict) -> pd.Series:
+        """
+        Return the total PnL for each instrument over the entire backtest period.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            pd.Series: Series with instruments as index and total PnL as values
+        """
+        return self._getPerformanceMetrics(status_dict)['total_pnl_by_instrument']
+
+    def computeTotalReturn(self, status_dict: dict) -> float:
+        """
+        Return the total return of the backtest as a single number.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            float: Total return across all instruments
+        """
+        return self._getPerformanceMetrics(status_dict)['total_return']
+
+    def computeSharpeRatio(self, status_dict: dict) -> float:
+        """
+        Return the annualized Sharpe Ratio of the backtest.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            float: Annualized Sharpe Ratio
+        """
+        daily_returns = self._getPerformanceMetrics(status_dict)['daily_returns']
+        
+        # Avoid division by zero
+        if daily_returns.std() == 0:
+            return 0
+        
+        sharpe_ratio = daily_returns.mean() / daily_returns.std()
+        return sharpe_ratio * np.sqrt(365)  # Annualize for crypto's 24/7 market
+
+    def computeMaxDrawdown(self, status_dict: dict) -> float:
+        """
+        Return the maximum drawdown of the backtest.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            float: Maximum drawdown as a negative percentage
+        """
+        portfolio_values = self._getPerformanceMetrics(status_dict)['daily_portfolio_value']
+        cum_max = portfolio_values.cummax()
+        drawdown = (portfolio_values - cum_max) / cum_max
+        return drawdown.min()
+
+    def computeCVaR(self, status_dict: dict, level: float) -> float:
+        """
+        Return the Conditional Value at Risk (CVaR) of the backtest.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            level (float): Confidence level (e.g., 0.05 for 5%)
+            
+        Returns:
+            float: CVaR value
+        """
+        portfolio_returns = self._getPerformanceMetrics(status_dict)['daily_returns']
+        n = len(portfolio_returns)
+        if n == 0:
+            return 0
+            
+        level_ordinal = int(n * level)
+        if level_ordinal == 0:  # Avoid empty slice
+            level_ordinal = 1
+            
+        res_ = portfolio_returns.sort_values()
+        return res_.iloc[:level_ordinal].mean()
+
     def getTradesHistoryDf( self, status_dict: dict ) -> dict[ str, pd.DataFrame ]:
         """ return the trades history of the backtest as a pandas DataFrame """
         lastTimeStamp = next( reversed( status_dict.keys() ) )
@@ -884,149 +1105,169 @@ class Backtest:
                 res[ imnt ][ 'Close Time' ].append( trade.close_time )
                 res[ imnt ][ 'Close PnL' ].append( trade.closed_pnl )
                 res[ imnt ][ 'Open PnL' ].append( trade.open_pnl )
-            
+                
             res[ imnt ] = pd.DataFrame( res[ imnt ] )
 
         return res
 
 
-    def getDailyPnL( self, status_dict: dict ) -> pd.DataFrame:
-        """ return the daily PnL of the backtest as a pandas DataFrame """
-        pnl_df = self.getPnL( status_dict )
-        daily_pnl_df = pnl_df.resample( 'D' ).sum()
-        daily_pnl_df.name = 'Daily PnL'
-        return daily_pnl_df
-    
-    def getPortfolioDailyValues( self, status_dict: dict ) -> pd.Series:
-        """ return the portfolio value of the backtest as a pandas Series """
-        PortfolioValue = { timeStamp: status.cur_portfolioMtMValue for timeStamp, status in status_dict.items() }
-        DailyPortfolioValueSeries = pd.Series( PortfolioValue ).resample( 'D' ).last()
-        DailyPortfolioValueSeries.name = 'Portfolio Daily Value'
-        return  DailyPortfolioValueSeries
-    
-    def getTotalMarginSeries( self, status_dict: dict ) -> pd.Series:
-        """ return the total margin of the backtest as a pandas Series """
-        total_margin_dict = { timeStamp: status.cur_total_margin for timeStamp, status in status_dict.items() }
-        total_margin_series = pd.Series( total_margin_dict, name = 'Total Margin' )
-        return total_margin_series
-    
-    def getTotalNotionalSeries( self, status_dict: dict ) -> pd.Series:
-        """ return the total notional value of the backtest as a pandas Series """
-        total_notional_dict = { timeStamp: status.cur_total_notional for timeStamp, status in status_dict.items() }
-        total_notional_series = pd.Series( total_notional_dict, name = 'Total Notional' )
-        return total_notional_series
-    
-    def getTotalLeverageSeries( self, status_dict: dict ) -> pd.Series:
-        """ return the total leverage of the backtest as a pandas Series """
-        total_leverage_dict = { timeStamp: status.cur_total_leverage for timeStamp, status in status_dict.items() }
-        total_leverage_series = pd.Series( total_leverage_dict, name = 'Total Leverage' ) 
-        return total_leverage_series
-    
-    def getPortfolioDailyRelativeReturns( self, status_dict: dict ) -> pd.Series:
-        """ return the relative returns of the backtest as a pandas DataFrame """
-        daily_MtM_series  = self.getPortfolioDailyValues( status_dict )
-        daily_MtM_returns = daily_MtM_series.pct_change()
-        daily_MtM_returns.name = 'Daily Relative Returns' 
-        return daily_MtM_returns
-    
-    def computeInstrumentTotalReturn( self, status_dict: dict ) -> pd.Series:
-        """ return the total PnL of the backtest """
-        pnl_df = self.getPnL( status_dict )
-        total_pnl = pnl_df.sum()
-        return total_pnl
-    
-    def computeTotalReturn( self, status_dict: dict ) -> float:
-        """ return the total return of the backtest """
-        pnl_df = self.getPnL( status_dict )
-        total_return = pnl_df.sum().sum()
-        return total_return
-        
-    def computeSharpeRatio( self, status_dict: dict ) -> float:
-        """ return the Sharpe Ratio of the backtest """
-        daily_returns = self.getPortfolioDailyRelativeReturns( status_dict )
-        sharpe_ratio = daily_returns.mean() / daily_returns.std()
-
-        return sharpe_ratio * np.sqrt( 365 )  # annualize the Sharpe Ratio; crypto market is 24/7
-    
-    def computeMaxDrawdown( self, status_dict: dict ) -> float:
-        """ return the maximum drawdown of the backtest """
-        PortfolioValueSeries = self.getPortfolioDailyValues( status_dict )
-        cum_max = PortfolioValueSeries.cummax()
-        drawdown = ( PortfolioValueSeries - cum_max ) / cum_max
-        max_drawdown = drawdown.min()
-
-        return max_drawdown
-
-
-    def computeCVaR( self, status_dict: dict, level: float ) -> float:
-        """ return the CVaR of the backtest """
-        portfolio_returns = self.getPortfolioDailyRelativeReturns( status_dict )
-        n = portfolio_returns.shape[ 0 ]
-        level_ordinal = int( n * level )
-        res_ = portfolio_returns.sort_values()
-        return res_.iloc[ : level_ordinal ].mean()
+    ##########################
+    ### Performance Graphs ###
+    ##########################
 
     def plotEquityCurve(self, status_dict: dict) -> None:
-        """ Plot the equity curve of the backtest with dollar formatting on the y-axis and trade markers """
+        """ 
+        Plot the equity curve of the backtest with dollar formatting on the y-axis, 
+        trade markers, and a drawdown subplot
+        """
+        
         # Get the portfolio value time series
-        PortfolioValueSeries = self.getPortfolioDailyValues(status_dict)
-
-        # Create a plotly figure
-        fig = go.Figure()
-
-        # Add the equity curve to the figure
-        fig.add_trace(go.Scatter(
-            x=PortfolioValueSeries.index,
-            y=PortfolioValueSeries.values,
-            mode='lines',
-            name='Equity Curve',
-            hoverinfo='x+y',
-            line=dict(color='blue')
-        ))
-
-
-        status = next( reversed( status_dict.values() ) )
+        portfolio_value_series = self.getPortfolioDailyValues(status_dict)
+        
+        # Calculate drawdown series
+        cum_max = portfolio_value_series.cummax()
+        drawdown_series = (portfolio_value_series - cum_max) / cum_max * 100  # Convert to percentage
+        
+        # Create subplots: 2 rows, 1 column with shared x-axis
+        fig = make_subplots(
+            rows=2, 
+            cols=1, 
+            shared_xaxes=True, 
+            vertical_spacing=0.08,
+            row_heights=[0.7, 0.3],  # 70% for equity curve, 30% for drawdown
+            subplot_titles=("Portfolio Equity", "Drawdown (%)")
+        )
+        
+        # Add the equity curve to the top subplot
+        fig.add_trace(
+            go.Scatter(
+                x=portfolio_value_series.index,
+                y=portfolio_value_series.values,
+                mode='lines',
+                name='Equity Curve',
+                hoverinfo='x+y',
+                line=dict(color='royalblue')
+            ),
+            row=1, col=1
+        )
+        
+        # Add drawdown to the bottom subplot
+        fig.add_trace(
+            go.Scatter(
+                x=drawdown_series.index,
+                y=drawdown_series.values,
+                mode='lines',
+                name='Drawdown',
+                fill='tozeroy',
+                fillcolor='rgba(255,0,0,0.2)',
+                line=dict(color='crimson'),
+                hoverinfo='x+y',
+                hovertemplate='%{x}<br>Drawdown: %{y:.2f}%'
+            ),
+            row=2, col=1
+        )
+        
+        status = next(reversed(status_dict.values()))
         # Plot trades: Retrieve trades from the position managers and plot them on the equity curve
         for imnt, pos_manager in status.cur_positions.items():
             for trade in pos_manager.positions:
                 # Plot the entry (open) of the trade
                 open_time = pd.Timestamp(trade.open_time.date())
-                fig.add_trace(go.Scatter(
-                    x=[open_time],
-                    y=[PortfolioValueSeries[open_time]],
-                    mode='markers',
-                    marker=dict(color='green', symbol='circle', size = 5),
-                    #name=f'Open {imnt}',
-                    hoverinfo='text',
-                    text=f'Open {imnt} <br>Open Time: {open_time}<br>Entry Price: {trade.entry_price:.2f}'
-                ))
-                logging.info(f"Plotted open trade at {trade.open_time} for {imnt}.")
+                if open_time in portfolio_value_series.index:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[open_time],
+                            y=[portfolio_value_series[open_time]],
+                            mode='markers',
+                            marker=dict(color='green', symbol='circle', size=5),
+                            #name=f'Open {imnt}',
+                            hoverinfo='text',
+                            text=f'Open {imnt} <br>Open Time: {open_time}<br>Entry Price: {trade.entry_price:.2f}'
+                        ),
+                        row=1, col=1
+                    )
+                    logging.info(f"Plotted open trade at {trade.open_time} for {imnt}.")
 
                 # Plot the exit (close) of the trade
                 if trade.close_time:
                     close_time = pd.Timestamp(trade.close_time.date())
-                    fig.add_trace(go.Scatter(
-                        x=[close_time],
-                        y=[PortfolioValueSeries[close_time]],
-                        mode='markers',
-                        marker=dict(color='red', symbol = 'x', size = 5),
-                        #name=f'Close {imnt}',
-                        hoverinfo='text',
-                        text=f'Close {imnt} <br>Close Time: {close_time} <br>Closed PnL: {trade.closed_pnl:.2f}'
-                    ))
-                    logging.info(f"Plotted close trade at {trade.close_time} for {imnt}.")
-
-        # Set y-axis label to emphasize that values are in dollars
-        fig.update_layout(
-            yaxis=dict(
-                title='Dollars',
-                tickformat='$,.0f'
-            ),
-            title = 'Equity Curve of the Strategy',
-            hovermode = 'x unified',
-            showlegend = False  # Disable the legend
+                    if close_time in portfolio_value_series.index:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=[close_time],
+                                y=[portfolio_value_series[close_time]],
+                                mode='markers',
+                                marker=dict(color='red', symbol='x', size=5),
+                                #name=f'Close {imnt}',
+                                hoverinfo='text',
+                                text=f'Close {imnt} <br>Close Time: {close_time} <br>Closed PnL: {trade.closed_pnl:.2f}'
+                            ),
+                            row=1, col=1
+                        )
+                        logging.info(f"Plotted close trade at {trade.close_time} for {imnt}.")
+        
+        # Format y-axis on equity curve subplot
+        fig.update_yaxes(
+            title_text='Dollars',
+            tickformat='$,.0f',
+            row=1, col=1
         )
-
+        
+        # Format y-axis on drawdown subplot
+        fig.update_yaxes(
+            title_text='Drawdown (%)',
+            tickformat='.2f%',
+            row=2, col=1
+        )
+        
+        # Add a horizontal line at y=0 on the drawdown subplot
+        fig.add_shape(
+            type="line",
+            x0=drawdown_series.index[0],
+            y0=0,
+            x1=drawdown_series.index[-1],
+            y1=0,
+            line=dict(color="gray", width=1, dash="dash"),
+            row=2, col=1
+        )
+        
+        # Display the maximum drawdown value as a horizontal line
+        max_dd = drawdown_series.min()
+        fig.add_shape(
+            type="line",
+            x0=drawdown_series.index[0],
+            y0=max_dd,
+            x1=drawdown_series.index[-1],
+            y1=max_dd,
+            line=dict(color="red", width=1, dash="dash"),
+            row=2, col=1
+        )
+        
+        # Add annotation for maximum drawdown
+        max_dd_date = drawdown_series.idxmin()
+        fig.add_annotation(
+            x=max_dd_date,
+            y=max_dd,
+            text=f"Max Drawdown: {max_dd:.2f}%",
+            showarrow=True,
+            arrowhead=1,
+            row=2, col=1,
+            arrowcolor="red",
+            font=dict(color="red"),
+            bgcolor="white",
+            bordercolor="red",
+            borderwidth=1
+        )
+        
+        # Update layout
+        fig.update_layout(
+            title='Equity Curve and Drawdown',
+            hovermode='x unified',
+            showlegend=False,  # Disable the legend
+            height=800,  # Increase height to accommodate both plots
+            margin=dict(t=50, b=50, l=50, r=50)
+        )
+        
         # Show the plot
         fig.show()
 
@@ -1101,53 +1342,47 @@ class Backtest:
 
     def plotPnL( self, status_dict: dict ) -> None:
         """ plot the PnL of the backtest """
-        pnl_df = pd.DataFrame( { timeStamp: status.cur_PnLVector for timeStamp, status in status_dict.items() } ).T
+        pnl_df = pd.DataFrame( { timeStamp: status.cur_CumulativePnL for timeStamp, status in status_dict.items() } ).T
         pnl_df.plot( title = "PnL of the Backtest" )
         plt.show()
 
-    def plotDailyPnL( self, status_dict: dict ) -> None:
-        """ Plot each instrument's daily PnL as a stacked bar chart with different colors """
+    def plotDailyPnL(self, status_dict: dict) -> None:
+        """ Plot each instrument's daily PnL as a stacked bar chart with different colors using Plotly """
 
         # Get the daily PnL DataFrame where columns represent tradables (instruments)
-        daily_pnl_df = self.getDailyPnL( status_dict )
+        daily_pnl_df = self.getDailyPnL(status_dict)
 
-        # Set up the figure and axes
-        fig, ax = plt.subplots()
+        # Create a plotly figure
+        fig = go.Figure()
 
-        # Initialize the bottom for stacking bars
-        bottom = None
-        
-        # Define colors for each instrument (optional, let matplotlib handle it otherwise)
-        colors = plt.cm.get_cmap('tab10', len(daily_pnl_df.columns))  # Color map
+        # Define colors for each instrument using plotly's built-in colorscales
+        colorscale = px.colors.qualitative.Plotly[:len(daily_pnl_df.columns)]
 
-        # Iterate over each instrument (column) and plot its PnL as a bar with a different color
+        # Iterate over each instrument (column) and add a bar trace
         for i, instrument in enumerate(daily_pnl_df.columns):
-            pnl_values = daily_pnl_df[instrument]
-            
-            # If it's the first instrument, no need for 'bottom' (base), otherwise stack
-            if bottom is None:
-                bottom = [0] * len(pnl_values)  # Initialize the bottom at zero for the first instrument
-                ax.bar(pnl_values.index, pnl_values.values, label=instrument, color=colors(i))
-            else:
-                ax.bar(pnl_values.index, pnl_values.values, bottom=bottom, label=instrument, color=colors(i))
-            
-            # Update the bottom to stack the next instrument's PnL on top of the previous ones
-            bottom += pnl_values
+            fig.add_trace(go.Bar(
+                x=daily_pnl_df.index,
+                y=daily_pnl_df[instrument],
+                name=instrument,
+                marker_color=colorscale[i % len(colorscale)]
+            ))
 
-        # Add title and labels
-        plt.title("Daily PnL by Instrument (Stacked Bar Chart)")
-        plt.xlabel("Date")
-        plt.ylabel("PnL (in $)")  # Emphasize that the y-axis is in dollars
+        # Configure the layout for a stacked bar chart
+        fig.update_layout(
+            title="Daily PnL by Instrument (Stacked Bar Chart)",
+            xaxis_title="Date",
+            yaxis_title="PnL (in $)",
+            barmode='stack',
+            yaxis=dict(
+                tickformat="$,.0f",
+            ),
+            legend=dict(
+                title="Instruments",
+                x=1.05,
+                y=1,
+                xanchor='left'
+            ),
+        )
 
-        # Rotate x-axis labels for better readability if needed
-        plt.xticks( rotation = 45 )
-
-        # Add a legend to show which color corresponds to which instrument
-        plt.legend(title="Instruments", bbox_to_anchor=(1.05, 1), loc='upper left')
-
-        # Format the y-axis ticks to show dollar sign
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'${x:,.0f}'))
-
-        # Show the plot with tight layout
-        plt.tight_layout()
-        plt.show()
+        # Show the plot
+        fig.show()

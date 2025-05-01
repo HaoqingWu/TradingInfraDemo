@@ -4,6 +4,14 @@ Binance Market Data Loader
 This script provides a class to fetch and manage OHLCV and funding rate data (both spot and perpetual futures)
 through Binance Python API.
 
+
+Required Packages:
+- pandas (>=1.5.0)
+- python-binance (>=1.0.16)
+- datetime (built-in)
+- os (built-in)
+- glob (built-in)
+
 Example:
     crypto_data = CryptoMarketData(
         symbol="BTCUSDT",
@@ -12,7 +20,7 @@ Example:
         end_date="2023-12-31",
         futures=True
     )
-    df = crypto_data.getdataDf()
+    df = crypto_data.getDataDf()
     crypto_data.writeOfflineCSV(df) # write the CSV data to the offline path
     crypto_data.updateOfflineCSV() # update and save the offline CSV file
 
@@ -148,7 +156,7 @@ class CryptoMarketData:
 
         return df
 
-    def getdataDf(self) -> pd.DataFrame:
+    def getDataDf(self) -> pd.DataFrame:
         """ load market data from binance and return a dataframe """
 
         dataDf = self._getMarketData()
