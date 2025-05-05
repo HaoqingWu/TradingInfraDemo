@@ -9,6 +9,8 @@ The goal is to use ML (black box) to predict market environment, then use tradit
 2. A pipelined classifier using CatBoost in `ModelTraining.py`.
 3. A simple backtest engine to backtest your strategy.
 
+## Example Usage
+[Demo1: Long-short Momentum Strategy](./Examples/Demo1.ipynb)
 
 ## Contributing
 
@@ -20,3 +22,4 @@ Also feel free to reach out to me if you want to discuss this project in more de
 ## License
 
 This project is licensed under the MIT License. See the LICENSE file for more details.
+

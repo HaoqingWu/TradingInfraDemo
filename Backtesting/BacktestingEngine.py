@@ -313,6 +313,10 @@ class PositionManager:
     """
     A class to manage multiple trades for ONE instrument.
     It ensures that at most one LONG and one SHORT trade is open per instrument.
+    Attributes:
+        imnt (str): The symbol of the instrument being traded (e.g., 'BTCUSDT').
+        positions (list[Trade]): A list of Trade objects representing the current open trades.
+        cumClosedPnL (float): The cumulative closed PnL for all trades.
     """
     def __init__( self, imnt: str, positions: list[ Trade ] = [] ):
         self.imnt: str = imnt
@@ -341,7 +345,7 @@ class PositionManager:
                 cur_position.close_position( new_trade.entry_price, new_trade.size, new_trade.open_time )
                 
                 # Add only the new closed PnL (not double counting)
-                self.cumClosedPnL += (cur_position.closed_pnl - initial_closed_pnl)
+                self.cumClosedPnL += ( cur_position.closed_pnl - initial_closed_pnl )
                 
         # open a new position
         elif ( not cur_position ) or ( cur_position.trade_status == TradeStatus.CLOSED ): # no open position
@@ -834,8 +838,7 @@ class Backtest:
                 # TODO: Currently, this part doesn't support longing and shorting on the same instrument
 
                 last_position = positions_t[ imnt ].positions[ -1 ]
-                if last_position.trade_status == TradeStatus.OPEN:
-                    self._status.cur_OpenPnLVector[ imnt ] = last_position.open_pnl
+                self._status.cur_OpenPnLVector[ imnt ] = last_position.open_pnl
                 
                 # Update the cumulative PnL
                 self._status.cur_CumulativePnL[ imnt ] = self._status.cur_OpenPnLVector[ imnt ] \
@@ -1095,7 +1098,7 @@ class Backtest:
                 'Close Time': [],
                 'Entry Price': [],
                 'Direction': [],
-                'Close PnL': [],
+                'Closed PnL': [],
                 'Open PnL': []
             }
             for trade in status_dict[ lastTimeStamp ].cur_positions[ imnt ].positions: # loop trades
@@ -1103,7 +1106,7 @@ class Backtest:
                 res[ imnt ][ 'Entry Price' ].append( trade.entry_price )
                 res[ imnt ][ 'Direction' ].append( trade.direction )
                 res[ imnt ][ 'Close Time' ].append( trade.close_time )
-                res[ imnt ][ 'Close PnL' ].append( trade.closed_pnl )
+                res[ imnt ][ 'Closed PnL' ].append( trade.closed_pnl )
                 res[ imnt ][ 'Open PnL' ].append( trade.open_pnl )
                 
             res[ imnt ] = pd.DataFrame( res[ imnt ] )
@@ -1323,7 +1326,7 @@ class Backtest:
                         marker=dict(color='red', symbol='x', size=5),
                         name='Close',
                         hoverinfo='text',
-                        text=f'Close {imnt} <br>Close Time: {close_time} <br>Closed PnL: {trade["Close PnL"]:.2f}'
+                        text=f'Close {imnt} <br>Close Time: {close_time} <br>Closed PnL: {trade["Closed PnL"]:.2f}'
                     ))
 
             # Set y-axis label to emphasize that values are in dollars

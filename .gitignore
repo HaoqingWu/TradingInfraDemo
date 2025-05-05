@@ -4,7 +4,6 @@ FeatureEngineering/
 Keys/
 draft/
 MarketDataLoader/OfflineData/
-*.ipynb
 .idea/
 *.pyc
 *.tsv
