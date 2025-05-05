@@ -12,6 +12,7 @@ The goal is to use ML (black box) to predict market environment, then use tradit
 ## Example Usage
 [Demo1: Long-short Momentum Strategy](./Examples/Demo1.ipynb)
 
+<img src = "Examples/EquityCurve.png" alt="Alt text description" width="900" height="600">
 ## Contributing
 
 Contributions and collabrations are welcome! 
