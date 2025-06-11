@@ -1,4 +1,10 @@
+# Python cache
 __pycache__/
+# Virtual environments
+.venv/
+venv/
+test_env/
+
 Research/
 FeatureEngineering/
 Keys/
@@ -9,3 +15,7 @@ MarketDataLoader/OfflineData/
 *.tsv
 .vscode/
 .DS_Store
+
+# Coverage reports
+coverage.xml
+
