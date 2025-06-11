@@ -1,8 +1,9 @@
 python-binance==1.0.17
-catboost==1.2.7
+catboost==1.2.8
 matplotlib==3.10.0
 numpy==2.2.3
 pandas==2.2.3
+polars==1.30.0
 plotly==6.0.0
 scikit_learn==1.6.1
 statsmodels==0.14.4
