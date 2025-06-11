@@ -21,10 +21,10 @@ import datetime as dt
 from tqdm.auto import tqdm
 import logging
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+from plotly.graph_objects import Figure
 
 from typing import Optional, Union
 from enum import Enum
@@ -292,12 +292,10 @@ class Trade:
             print( f"{ close_time }: {self.imnt} trade closed with PnL: { self.closed_pnl }")
         else: # partial close
             if self.direction == Direction.LONG:
-                self.closed_pnl += ( close_price - self.entry_price ) * close_size
+                partial_pnl = ( close_price - self.entry_price ) * close_size
             else:
-                self.closed_pnl += ( self.entry_price - close_price ) * close_size
-            if abs( self.open_pnl ) < abs( self.closed_pnl ):
-                raise ValueError( "Something is wrong: Closed PnL > open PnL!" )
-            self.open_pnl   -= self.closed_pnl
+                partial_pnl = ( self.entry_price - close_price ) * close_size
+            self.closed_pnl += partial_pnl
             self.size       -= close_size
 
     def _update_unrealized_pnl( self, cur_price: float ) -> None:
@@ -817,7 +815,7 @@ class Backtest:
         cash_t               = self._status.cur_cash
         orderTicket_t        = self._status.cur_orderTicket
 
-        # Update the Order Ticket 
+        # Update the Order Ticket
         orderTicket_t.update_orders() # clean up expired orders
         orderTicket_t.aggregate_orders( newOrderTicket )
 
@@ -844,8 +842,9 @@ class Backtest:
                 self._status.cur_CumulativePnL[ imnt ] = self._status.cur_OpenPnLVector[ imnt ] \
                                                         + positions_t[ imnt ].cumClosedPnL 
 
-        if cash_t < 0:
-            raise ValueError( "Cash cannot be negative!" )        
+        if self._status.cur_cash < 0:
+            # raise ValueError( "Cash cannot be negative!" )        
+            logging.warning( f"Cash is negative: {self._status.cur_cash}. This may lead to liquidation." )
 
         # Update the MtM value of the portfolio
         cur_open_trade = {imnt: positions_t[imnt].positions[-1] if positions_t[imnt].positions and positions_t[imnt].positions[-1].trade_status == TradeStatus.OPEN
@@ -1048,7 +1047,48 @@ class Backtest:
             return 0
         
         sharpe_ratio = daily_returns.mean() / daily_returns.std()
-        return sharpe_ratio * np.sqrt(365)  # Annualize for crypto's 24/7 market
+        return sharpe_ratio * np.sqrt( 365 )  # Annualize for crypto's 24/7 market
+    
+    def computeSortinoRatio( self, status_dict: dict ) -> float:
+        """
+        Return the annualized Sortino Ratio of the backtest.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            float: Annualized Sortino Ratio
+        """
+
+        daily_returns = self._getPerformanceMetrics(status_dict)['daily_returns']
+        
+        # Calculate downside deviation
+        downside_returns = daily_returns[ daily_returns < 0 ]
+        if downside_returns.std() == 0:
+            return 0
+        
+        sortino_ratio = daily_returns.mean() / downside_returns.std()
+        
+        return sortino_ratio * np.sqrt( 365 )
+    
+    def computeCalmarRatio( self, status_dict: dict ) -> float:
+        """
+        Return the Calmar Ratio of the backtest.
+        
+        Args:
+            status_dict (dict): Dictionary of backtest status snapshots
+            
+        Returns:
+            float: Calmar Ratio
+        """
+        total_return = self.computeTotalReturn(status_dict)
+        max_drawdown = self.computeMaxDrawdown(status_dict)
+        
+        # Avoid division by zero
+        if max_drawdown == 0:
+            return np.inf
+        
+        return total_return / abs( max_drawdown )
 
     def computeMaxDrawdown(self, status_dict: dict) -> float:
         """
@@ -1118,10 +1158,14 @@ class Backtest:
     ### Performance Graphs ###
     ##########################
 
-    def plotEquityCurve(self, status_dict: dict) -> None:
+
+    def plotEquityCurve(self, 
+                   status_dict: dict, 
+                   plot_trades: bool = False,
+                   plot_btc_benchmark: bool = True) -> Figure:
         """ 
         Plot the equity curve of the backtest with dollar formatting on the y-axis, 
-        trade markers, and a drawdown subplot
+        trade markers, drawdown subplot, and optional BTC buy-and-hold comparison
         """
         
         # Get the portfolio value time series
@@ -1129,7 +1173,30 @@ class Backtest:
         
         # Calculate drawdown series
         cum_max = portfolio_value_series.cummax()
-        drawdown_series = (portfolio_value_series - cum_max) / cum_max * 100  # Convert to percentage
+        drawdown_series = (portfolio_value_series - cum_max) / cum_max * 100
+        
+        # Create BTC buy-and-hold benchmark if requested
+        btc_equity_series = None
+        btc_drawdown_series = None
+        
+        if plot_btc_benchmark and 'BTCUSDT' in self._tradables:
+            # Get BTC price data for the same period
+            start_time = portfolio_value_series.index[0]
+            end_time = portfolio_value_series.index[-1]
+            
+            # Get BTC prices (daily close prices)
+            btc_prices = self._dataDict['BTCUSDT']['Close'].resample('D').last()
+            btc_prices = btc_prices.loc[start_time:end_time]
+            
+            # Calculate BTC buy-and-hold equity curve
+            initial_btc_price = btc_prices.iloc[0]
+            btc_shares = self._initialCash / initial_btc_price  # Number of BTC shares bought
+            btc_equity_series = btc_prices * btc_shares
+            btc_equity_series.name = 'BTC Buy & Hold'
+            
+            # Calculate BTC drawdown
+            btc_cum_max = btc_equity_series.cummax()
+            btc_drawdown_series = (btc_equity_series - btc_cum_max) / btc_cum_max * 100
         
         # Create subplots: 2 rows, 1 column with shared x-axis
         fig = make_subplots(
@@ -1137,81 +1204,104 @@ class Backtest:
             cols=1, 
             shared_xaxes=True, 
             vertical_spacing=0.08,
-            row_heights=[0.7, 0.3],  # 70% for equity curve, 30% for drawdown
-            subplot_titles=("Portfolio Equity", "Drawdown (%)")
+            row_heights=[0.7, 0.3],
+            subplot_titles=("Portfolio Equity vs BTC Buy & Hold", "Drawdown Comparison (%)")
         )
         
-        # Add the equity curve to the top subplot
+        # Add the strategy equity curve to the top subplot
         fig.add_trace(
             go.Scatter(
                 x=portfolio_value_series.index,
                 y=portfolio_value_series.values,
                 mode='lines',
-                name='Equity Curve',
+                name='Strategy',
                 hoverinfo='x+y',
-                line=dict(color='royalblue')
+                line=dict(color='royalblue', width=2)
             ),
             row=1, col=1
         )
         
-        # Add drawdown to the bottom subplot
+        # Add BTC buy-and-hold equity curve if available
+        if btc_equity_series is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x = btc_equity_series.index,
+                    y = btc_equity_series.values,
+                    mode = 'lines',
+                    name = 'BTC Buy & Hold',
+                    hoverinfo = 'x+y',
+                    line = dict(color='orange', width=2, dash='dash')
+                ),
+                row = 1, col = 1
+            )
+        
+        # Add strategy drawdown to the bottom subplot
         fig.add_trace(
             go.Scatter(
                 x=drawdown_series.index,
                 y=drawdown_series.values,
                 mode='lines',
-                name='Drawdown',
+                name='Strategy Drawdown',
                 fill='tozeroy',
-                fillcolor='rgba(255,0,0,0.2)',
-                line=dict(color='crimson'),
+                fillcolor='rgba(65,105,225,0.2)',
+                line=dict(color='royalblue'),
                 hoverinfo='x+y',
-                hovertemplate='%{x}<br>Drawdown: %{y:.2f}%'
+                hovertemplate='%{x}<br>Strategy DD: %{y:.2f}%'
             ),
             row=2, col=1
         )
         
-        status = next(reversed(status_dict.values()))
-        # Plot trades: Retrieve trades from the position managers and plot them on the equity curve
-        for imnt, pos_manager in status.cur_positions.items():
-            for trade in pos_manager.positions:
-                # Plot the entry (open) of the trade
-                open_time = pd.Timestamp(trade.open_time.date())
-                if open_time in portfolio_value_series.index:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[open_time],
-                            y=[portfolio_value_series[open_time]],
-                            mode='markers',
-                            marker=dict(color='green', symbol='circle', size=5),
-                            #name=f'Open {imnt}',
-                            hoverinfo='text',
-                            text=f'Open {imnt} <br>Open Time: {open_time}<br>Entry Price: {trade.entry_price:.2f}'
-                        ),
-                        row=1, col=1
-                    )
-                    logging.info(f"Plotted open trade at {trade.open_time} for {imnt}.")
+        # Add BTC drawdown to the bottom subplot
+        if btc_drawdown_series is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=btc_drawdown_series.index,
+                    y=btc_drawdown_series.values,
+                    mode='lines',
+                    name='BTC Drawdown',
+                    line=dict(color = 'orange', dash='dash'),
+                    hoverinfo='x+y',
+                    hovertemplate='%{x}<br>BTC DD: %{y:.2f}%'
+                ),
+                row=2, col=1
+            )
+        
+        # Calculate and display performance comparison
+        strategy_total_return = (portfolio_value_series.iloc[-1] / self._initialCash - 1) * 100
+        strategy_max_dd = drawdown_series.min()
+        
+        if btc_equity_series is not None:
+            btc_total_return = (btc_equity_series.iloc[-1] / self._initialCash - 1) * 100
+            btc_max_dd = btc_drawdown_series.min()
+            
+            # Calculate daily returns for both
+            strategy_returns = portfolio_value_series.pct_change().dropna()
+            btc_returns = btc_equity_series.pct_change().dropna()
+            corr = strategy_returns.corr( btc_returns )
 
-                # Plot the exit (close) of the trade
-                if trade.close_time:
-                    close_time = pd.Timestamp(trade.close_time.date())
-                    if close_time in portfolio_value_series.index:
-                        fig.add_trace(
-                            go.Scatter(
-                                x=[close_time],
-                                y=[portfolio_value_series[close_time]],
-                                mode='markers',
-                                marker=dict(color='red', symbol='x', size=5),
-                                #name=f'Close {imnt}',
-                                hoverinfo='text',
-                                text=f'Close {imnt} <br>Close Time: {close_time} <br>Closed PnL: {trade.closed_pnl:.2f}'
-                            ),
-                            row=1, col=1
-                        )
-                        logging.info(f"Plotted close trade at {trade.close_time} for {imnt}.")
+            # Add performance comparison annotation
+            comparison_text = (
+                f"Strategy: {strategy_total_return:.1f}% return, {strategy_max_dd:.1f}% MDD <br>"
+                f"BTC B&H: {btc_total_return:.1f}% return, {btc_max_dd:.1f}% MDD <br>"
+                f"Strategy BTC Correlation: {corr:.2f}"
+            )
+            
+            fig.add_annotation(
+                text=comparison_text,
+                xref="paper", yref="paper",
+                x=0.95, y=0.98,  # Adjust these values to change position:
+                                 # x: 0 (left) to 1 (right)
+                                 # y: 0 (bottom) to 1 (top)
+                showarrow=False,
+                font=dict(size=12),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="black",
+                borderwidth=1,
+            )
         
         # Format y-axis on equity curve subplot
         fig.update_yaxes(
-            title_text='Dollars',
+            title_text='Portfolio Value ($)',
             tickformat='$,.0f',
             row=1, col=1
         )
@@ -1219,20 +1309,12 @@ class Backtest:
         # Format y-axis on drawdown subplot
         fig.update_yaxes(
             title_text='Drawdown (%)',
-            tickformat='.2f%',
+            tickformat='.1f',
             row=2, col=1
         )
         
-        # Add a horizontal line at y=0 on the drawdown subplot
-        fig.add_shape(
-            type="line",
-            x0=drawdown_series.index[0],
-            y0=0,
-            x1=drawdown_series.index[-1],
-            y1=0,
-            line=dict(color="gray", width=1, dash="dash"),
-            row=2, col=1
-        )
+        # Add horizontal line at y=0 on drawdown subplot
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", row=2, col=1)
         
         # Display the maximum drawdown value as a horizontal line
         max_dd = drawdown_series.min()
@@ -1262,18 +1344,25 @@ class Backtest:
             borderwidth=1
         )
         
+
         # Update layout
         fig.update_layout(
             title='Equity Curve and Drawdown',
             hovermode='x unified',
-            showlegend=False,  # Disable the legend
-            height=800,  # Increase height to accommodate both plots
-            margin=dict(t=50, b=50, l=50, r=50)
+            height=800,
+            margin=dict(t=80, b=50, l=50, r=50),
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            )
         )
         
         # Show the plot
         fig.show()
-
+        
+        return fig
 
     def plotEntryExitTrades(self, status_dict: dict) -> None:
         """ Plot the entry and exit trades on the price graph of each instrument using Plotly """

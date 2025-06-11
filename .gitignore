@@ -8,3 +8,4 @@ MarketDataLoader/OfflineData/
 *.pyc
 *.tsv
 .vscode/
+.DS_Store

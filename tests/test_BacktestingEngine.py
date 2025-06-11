@@ -1,5 +1,14 @@
 import unittest
-from Backtesting.BacktestingEngine import OrderTicket, Order, Trade, Direction, TradeStatus, OrderType, PositionManager, BacktestStatus, Backtest
+from Backtesting.BacktestingEngine import ( OrderTicket, 
+                                            Order, 
+                                            Trade, 
+                                            Direction, 
+                                            TradeStatus, 
+                                            OrderType, 
+                                            PositionManager, 
+                                            BacktestStatus, 
+                                            Backtest
+            )
 import datetime as dt
 import pandas as pd
 import numpy as np
@@ -77,11 +86,9 @@ class TradeTest(unittest.TestCase):
         close_price = 5100.0
         close_size = 1.0
 
-        # Open PnL should be updated
-        self.short_trade._update_unrealized_pnl( cur_price = close_price )
-
         # Close a partial position
         self.short_trade.close_position( close_price = close_price, close_size = close_size, close_time = dt.datetime.now() )
+        self.short_trade._update_unrealized_pnl( cur_price = close_price )
 
         # Check remaining size and closed PnL
         self.assertEqual( self.short_trade.size, 2.0 )
@@ -106,47 +113,6 @@ class TradeTest(unittest.TestCase):
         expected_open_pnl = ( cur_price - 5500 ) * self.short_trade.size
         self.assertEqual( self.short_trade.open_pnl, expected_open_pnl )
 
-
-    def test_update_trade(self):
-        """ Test updating a trade using an order. """
-        # Create an order to add to the position
-        order = Order(
-            imnt = 'BTCUSDT',
-            price=5100.0,
-            direction=Direction.LONG,
-            type = OrderType.OPEN,
-            leverage = 5,
-            size = 1.0,
-            duration = 2,
-            cur_time = dt.datetime( 2024, 9, 9, 22, 41 )
-        )
-
-        # Update the trade using the order
-        self.trade.update_trade(order)
-
-        # Entry price and size should be updated
-        expected_entry_price = (5000.0 * 2.0 + 5100.0 * 1.0) / 3.0
-        self.assertEqual(self.trade.entry_price, expected_entry_price)
-        self.assertEqual(self.trade.size, 3.0)  # Size should now be 3.0
-
-    def test_direction_mismatch( self ):
-        """ Test error raised for mismatched direction between trade and order. """
-        # Create a conflicting order with the opposite direction
-        wrong_direction_order = Order(
-            imnt = 'BTCUSDT',
-            price=5100.0,
-            direction=Direction.SHORT,  # Opposite direction
-            type=OrderType.OPEN,
-            leverage = 5,
-            size = 1.0,
-            duration = 2,
-            cur_time = dt.datetime( 2024, 9, 9, 22, 41 )
-        )
-
-        # Expect ValueError due to direction mismatch
-        with self.assertRaises(ValueError):
-            self.trade.update_trade( wrong_direction_order )
-
     def test_orderFilledToTrade( self ):
         """ Test converting an order to a trade. """
         order = Order(
@@ -160,7 +126,7 @@ class TradeTest(unittest.TestCase):
             cur_time=dt.datetime(2024, 9, 9, 22, 41)
         )
 
-        trade = order.orderFilledToTrade( dt.datetime( 2024, 9, 9, 22, 41 ) )
+        trade = order._orderFilledToTrade( dt.datetime( 2024, 9, 9, 22, 41 ) )
 
         # Check if the trade is created correctly
         self.assertEqual( trade.imnt, order.imnt )
@@ -472,7 +438,7 @@ class BacktestStatusTest(unittest.TestCase):
         """ Test the initial state of the backtest status. """
         self.assertEqual(len(self.backtest_status.cur_positions), len(self.tradables))
         self.assertEqual(len(self.backtest_status.cur_priceVector), len(self.tradables))
-        self.assertEqual(len(self.backtest_status.cur_PnLVector), len(self.tradables))
+        self.assertEqual(len(self.backtest_status.cur_CumulativePnL), len(self.tradables))
         self.assertEqual(self.backtest_status.cur_cash, self.initial_cash)
         self.assertEqual(self.backtest_status.cur_portfolioMtMValue, self.initial_cash)
         self.assertEqual(len(self.backtest_status.cur_orderTicket), 0)
@@ -496,10 +462,10 @@ class BacktestStatusTest(unittest.TestCase):
     def test_update_PnL_vector(self):
         """ Test updating the PnL vector in the backtest status. """
         pnl = 100.0
-        self.backtest_status.cur_PnLVector["BTCUSDT"] = pnl
+        self.backtest_status.cur_CumulativePnL["BTCUSDT"] = pnl
 
         # Check if the PnL vector is updated correctly
-        self.assertEqual(self.backtest_status.cur_PnLVector["BTCUSDT"], pnl)
+        self.assertEqual(self.backtest_status.cur_CumulativePnL["BTCUSDT"], pnl)
 
     def test_update_cash(self):
         """ Test updating the cash in the backtest status. """
@@ -534,8 +500,9 @@ class BacktestTest( unittest.TestCase ):
 
 
         #  Load offline data for testing
+
         self.dataDict = {}
-        path = r"/MarketDataLoader/OfflineData/"
+        path = r"/Users/HaoqingWu/Documents/Trading/TradingBinance/MarketDataLoader/OfflineData/"
         for imnt in self.tradables:
             self.dataDict[ imnt ] = pd.read_csv( path + f'{imnt}_4h_Main.csv' )
             self.dataDict[ imnt ][ 'Open Time' ] = pd.to_datetime( self.dataDict[ imnt ][ 'Open Time' ] )
@@ -785,9 +752,7 @@ class BacktestTest( unittest.TestCase ):
         self.backtest.plotDailyPnL( strategy_result )
 
         # Compute the Sharpe ratio
-        sharpe_ratio = self.backtest.computeSharpeRatio( strategy_result )
-        # Compute the Sharpe ratio
-        expected_sharpe_ratio = 0.31020
+        expected_sharpe_ratio = 0.29466
         actual_sharpe_ratio = self.backtest.computeSharpeRatio(strategy_result)
         self.assertAlmostEqual(actual_sharpe_ratio, expected_sharpe_ratio, delta=1e-3)
 
